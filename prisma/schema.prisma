@@ -1,0 +1,288 @@
+// Modelo de datos de FutbolApp (MVP).
+// Idea clave: Usuario = cuenta, Jugador = identidad futbolística.
+// Un Jugador puede existir SIN cuenta (lo crea alguien por nombre) y después
+// "reclamarse" cuando la persona se registra (se completa Player.userId).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Position {
+  GK // arquero
+  DEF // defensor
+  MID // mediocampista
+  FWD // delantero
+}
+
+enum Visibility {
+  PUBLIC // se ve en listados
+  LINK // solo quien tenga el link
+  PRIVATE // solo participantes
+}
+
+enum TeamRole {
+  CAPTAIN // capitán (quien creó el equipo)
+  REGULAR // jugador habitual
+  GUEST // invitado
+}
+
+enum MatchStatus {
+  SCHEDULED
+  FINISHED
+  CANCELLED
+}
+
+enum Side {
+  HOME
+  AWAY
+}
+
+enum Attendance {
+  PENDING
+  CONFIRMED
+  DECLINED
+}
+
+// Cuenta dentro de la aplicación
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+
+  player       Player?  @relation("PlayerAccount")
+  teamsCreated Team[]
+  matchesCreated Match[]
+  guestsCreated Player[] @relation("PlayerCreator")
+  notifications Notification[]
+}
+
+// Identidad futbolística
+model Player {
+  id          String    @id @default(cuid())
+  // null = jugador sin cuenta (todavía no reclamado)
+  userId      String?   @unique
+  user        User?     @relation("PlayerAccount", fields: [userId], references: [id])
+  // quién lo cargó si no tiene cuenta
+  createdById String?
+  createdBy   User?     @relation("PlayerCreator", fields: [createdById], references: [id])
+  // código para que la persona reclame este jugador al registrarse
+  claimCode   String?   @unique
+
+  firstName   String
+  lastName    String?
+  photoUrl    String?   @db.MediumText
+  // aparece en la búsqueda de jugadores
+  discoverable Boolean  @default(true)
+  birthDate   DateTime?
+  position    Position?
+  number      Int?
+  createdAt   DateTime  @default(now())
+
+  teams       TeamMember[]
+  matches     MatchPlayer[]
+  goals       Goal[]    @relation("Scorer")
+  assists     Goal[]    @relation("Assister")
+  mvps        Match[]   @relation("Mvp")
+  states          StateEntry[]
+  ratingsGiven    PlayerRating[] @relation("Rater")
+  ratingsReceived PlayerRating[] @relation("Rated")
+
+  @@index([createdById])
+}
+
+model Team {
+  id          String     @id @default(cuid())
+  name        String
+  // Sigla de 2 a 4 letras para espacios chicos (ej. "PIB")
+  shortName   String?
+  description String?
+  // Barrio o ciudad donde juegan
+  zone        String?
+  // Cantidad de jugadores por lado con la que suelen jugar (5, 6, 7, 8, 9 u 11)
+  format      Int        @default(5)
+  // Color de la camiseta, en hexadecimal (#RRGGBB)
+  color       String     @default("#0E1A3A")
+  // Escudo: o uno de la galería (crestPreset = id) o una imagen subida (crestUrl = data URL chica)
+  crestPreset String?
+  crestUrl    String?    @db.MediumText
+  photoUrl    String?
+  visibility  Visibility @default(LINK)
+  // Código del link de invitación (/e/<código>). Se puede renovar para anular el anterior
+  inviteCode  String?    @unique
+  ownerId     String
+  owner       User       @relation(fields: [ownerId], references: [id])
+  createdAt   DateTime   @default(now())
+
+  members     TeamMember[]
+  homeMatches Match[]    @relation("HomeTeam")
+  awayMatches Match[]    @relation("AwayTeam")
+  goals       Goal[]
+
+  @@index([ownerId])
+}
+
+// Un jugador puede estar en muchos equipos
+model TeamMember {
+  id       String    @id @default(cuid())
+  teamId   String
+  team     Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  playerId String
+  player   Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  role     TeamRole  @default(REGULAR)
+  joinedAt DateTime  @default(now())
+  leftAt   DateTime? // para la "carrera": etapas en cada equipo
+
+  @@unique([teamId, playerId])
+  @@index([playerId])
+}
+
+model Match {
+  id            String      @id @default(cuid())
+  // código corto del link público: /p/<shareCode>
+  shareCode     String      @unique
+  playersPerSide Int        // 5, 6, 7, 8, 9, 11 o personalizado
+  // Partido entre equipos: homeTeamId. Picado abierto (se arman los dos equipos entre
+  // los jugadores anotados): homeTeamId es null y los lados se llaman homeName / awayName.
+  homeTeamId    String?
+  homeTeam      Team?       @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  homeName      String?
+  // El rival puede ser un equipo de la app o solo un nombre (equipo que no usa la app)
+  awayTeamId    String?
+  awayTeam      Team?       @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  awayName      String?
+  playedAt      DateTime
+  venue         String?
+  notes         String?
+  visibility    Visibility  @default(LINK)
+  status        MatchStatus @default(SCHEDULED)
+  homeScore     Int?
+  awayScore     Int?
+  // formación elegida por lado, ej. "2-1-1"
+  // figura del partido (jugador del local)
+  mvpId         String?
+  mvp           Player?     @relation("Mvp", fields: [mvpId], references: [id])
+  homeFormation String?
+  awayFormation String?
+  createdById   String
+  createdBy     User        @relation(fields: [createdById], references: [id])
+  createdAt     DateTime    @default(now())
+
+  players       MatchPlayer[]
+  goals         Goal[]
+  ratings       PlayerRating[]
+
+  @@index([homeTeamId])
+  @@index([awayTeamId])
+  @@index([createdById])
+  @@index([mvpId])
+  @@index([playedAt])
+}
+
+// Quién jugó cada partido y dónde estaba parado en la cancha
+model MatchPlayer {
+  id         String     @id @default(cuid())
+  matchId    String
+  match      Match      @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  playerId   String
+  player     Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  side       Side?
+  attendance Attendance @default(PENDING)
+  // null = anotado pero todavía sin equipo (picado abierto)
+  // posición en la cancha, en porcentaje (0 a 100); null si no se ubicó
+  posX       Float?
+  posY       Float?
+
+  @@unique([matchId, playerId])
+  @@index([playerId])
+}
+
+// Un gol, con goleador y asistente opcional
+model Goal {
+  id         String   @id @default(cuid())
+  matchId    String
+  match      Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  // equipo al que se le suma el gol
+  teamId     String?
+  team       Team?    @relation(fields: [teamId], references: [id])
+  // a qué lado se le suma el gol
+  side       Side     @default(HOME)
+  scorerId   String
+  scorer     Player   @relation("Scorer", fields: [scorerId], references: [id])
+  assisterId String?
+  assister   Player?  @relation("Assister", fields: [assisterId], references: [id])
+  minute     Int?
+  ownGoal    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([matchId])
+  @@index([scorerId])
+  @@index([assisterId])
+  @@index([teamId])
+}
+
+// Valoración de un compañero después de un partido (anónima para quien la recibe)
+model PlayerRating {
+  id        String   @id @default(cuid())
+  matchId   String
+  match     Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  raterId   String
+  rater     Player   @relation("Rater", fields: [raterId], references: [id], onDelete: Cascade)
+  ratedId   String
+  rated     Player   @relation("Rated", fields: [ratedId], references: [id], onDelete: Cascade)
+  // 1 a 10
+  score     Int
+  // en qué se destacó, separado por comas (ver lib/ratings.ts)
+  traits    String   @default("")
+  createdAt DateTime @default(now())
+
+  @@unique([matchId, raterId, ratedId])
+  @@index([ratedId])
+  @@index([matchId])
+}
+
+enum PlayerStatus {
+  READY
+  MINOR_ISSUE
+  RESTING
+}
+
+// "Mi estado": cada vez que el jugador lo actualiza queda una entrada, así se ve la evolución.
+// Son datos que carga el propio jugador (autoevaluación), no un registro médico.
+model StateEntry {
+  id        String       @id @default(cuid())
+  playerId  String
+  player    Player       @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  // 1 a 10
+  speed     Int
+  stamina   Int
+  power     Int
+  technique Int
+  defense   Int
+  status    PlayerStatus @default(READY)
+  // nota personal, la ve solo el jugador
+  note      String?
+  createdAt DateTime     @default(now())
+
+  @@index([playerId, createdAt])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?
+  // a dónde lleva al tocarla
+  href      String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt, createdAt])
+}
